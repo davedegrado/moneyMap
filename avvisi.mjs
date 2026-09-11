@@ -40,6 +40,21 @@ async function leggi(tabella, query = "") {
   return r.json();
 }
 
+// Il periodo contabile dipende dal giorno d'inizio dell'utente e dalle sue
+// eccezioni: serve per sapere a quale periodo appartiene una spunta.
+function inizioPeriodo(startDay, overrides, y, m) {
+  const chiave = `${y}-${String(m + 1).padStart(2, "0")}`;
+  const g = Math.min(28, Math.max(1, overrides[chiave] || startDay || 1));
+  return new Date(y, m, g);
+}
+
+function periodoDi(startDay, overrides, giorno) {
+  const y = giorno.getFullYear(), m = giorno.getMonth();
+  const inizio = inizioPeriodo(startDay, overrides, y, m);
+  const d = giorno >= inizio ? new Date(y, m, 1) : new Date(y, m - 1, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
 const iso = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
@@ -67,11 +82,23 @@ const euro = (n) =>
 
 const quando = (g) => (g === 0 ? "oggi" : g === 1 ? "domani" : `fra ${g} giorni`);
 
+// per le manuali con una scadenza: quanto manca, o da quanto e' passata
+function scadenzaTesto(day, oggi) {
+  const questo = new Date(oggi.getFullYear(), oggi.getMonth(), day);
+  const giorni = Math.round((questo - oggi) / 86400000);
+  if (giorni === 0) return " · scade oggi";
+  if (giorni > 0) return ` · entro ${quando(giorni)}`;
+  return ` · scaduta da ${-giorni} ${-giorni === 1 ? "giorno" : "giorni"}`;
+}
+
 async function main() {
   const oggi = new Date();
   oggi.setHours(0, 0, 0, 0);
 
   const regole = await leggi("recurring", "deleted_at=is.null&select=*");
+  const spunte = await leggi("recurring_paid", "select=recurring_id,period_key");
+  const profili = await leggi("profiles", "select=id,start_day");
+  const eccezioni = await leggi("period_overrides", "select=user_id,period_key,start_day");
   const conti = await leggi("wallets", "deleted_at=is.null&select=id,name");
   const membri = await leggi("wallet_members", "select=wallet_id,user_id");
   const iscrizioni = await leggi("push_subscriptions", "select=*");
@@ -87,17 +114,44 @@ async function main() {
   const utentiDi = (walletId) =>
     membri.filter((m) => m.wallet_id === walletId).map((m) => m.user_id);
 
+  const pagata = new Set(spunte.map((x) => `${x.recurring_id}|${x.period_key}`));
+  const giornoInizio = new Map(profili.map((p) => [p.id, p.start_day || 1]));
+  const eccezioniDi = (u) => {
+    const o = {};
+    eccezioni.filter((e) => e.user_id === u).forEach((e) => { o[e.period_key] = e.start_day; });
+    return o;
+  };
+
   const daMandare = new Map();   // user_id -> righe di testo
+  const aggiungi = (u, riga) => {
+    if (!daMandare.has(u)) daMandare.set(u, []);
+    if (!daMandare.get(u).includes(riga)) daMandare.get(u).push(riga);
+  };
+
   for (const r of regole) {
-    const ev = inArrivo(r, oggi);
-    if (!ev) continue;
     const conto = nomeConto.get(r.wallet_id) || "conto";
     const verso = r.to_wallet_id ? ` → ${nomeConto.get(r.to_wallet_id) || "conto"}` : "";
-    const riga = `${r.name} ${euro(r.amount)} ${quando(ev.giorni)} · ${conto}${verso}`;
-    for (const u of utentiDi(r.wallet_id)) {
-      if (!daMandare.has(u)) daMandare.set(u, []);
-      daMandare.get(u).push(riga);
+    const utenti = utentiDi(r.wallet_id);
+
+    if (r.manuale) {
+      // Va pagata a mano: si insiste ogni giorno finche' non e' spuntata.
+      // Il periodo dipende dalle impostazioni di chi riceve l'avviso, quindi
+      // si calcola per ciascuno.
+      for (const u of utenti) {
+        const periodo = periodoDi(giornoInizio.get(u) || 1, eccezioniDi(u), oggi);
+        if (periodo < (r.start_key || "")) continue;
+        if (r.end_key && periodo > r.end_key) continue;
+        if (pagata.has(`${r.id}|${periodo}`)) continue;
+        const scadenza = r.day ? scadenzaTesto(r.day, oggi) : "";
+        aggiungi(u, `${r.name} ${euro(r.amount)} da pagare${scadenza} · ${conto}${verso}`);
+      }
+      continue;
     }
+
+    const ev = inArrivo(r, oggi);
+    if (!ev) continue;
+    const riga = `${r.name} ${euro(r.amount)} ${quando(ev.giorni)} · ${conto}${verso}`;
+    for (const u of utenti) aggiungi(u, riga);
   }
 
   if (daMandare.size === 0) {
@@ -110,7 +164,7 @@ async function main() {
     const subs = perUtente.get(utente) || [];
     if (!subs.length) { console.log(`utente ${utente}: nessun dispositivo iscritto`); continue; }
 
-    const titolo = righe.length === 1 ? "Rata in arrivo" : `${righe.length} scadenze in arrivo`;
+    const titolo = righe.length === 1 ? "Money Map" : `${righe.length} scadenze`;
     const testo = righe.join("\n");
     console.log(`→ ${utente} (${subs.length} dispositivi): ${righe.join(" | ")}`);
     if (PROVA) continue;
