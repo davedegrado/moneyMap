@@ -1,0 +1,31 @@
+name: Avvisi rate in arrivo
+
+on:
+  schedule:
+    # ogni giorno alle 08:00 italiane (07:00 UTC d'estate, 08:00 d'inverno:
+    # GitHub usa sempre UTC, quindi d'inverno arrivera' alle 09:00)
+    - cron: "0 7 * * *"
+  workflow_dispatch:      # per lanciarlo a mano dalla scheda Actions
+
+jobs:
+  avvisi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Installa web-push
+        run: npm install web-push@3 --no-save
+
+      - name: Manda gli avvisi
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
+          GIORNI_PRIMA: "2"
+        run: node notifiche/avvisi.mjs
