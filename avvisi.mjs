@@ -40,6 +40,17 @@ async function leggi(tabella, query = "") {
   return r.json();
 }
 
+// Una tabella o una colonna che ancora non esiste non deve far saltare tutto:
+// gli avvisi che funzionano lo stesso devono partire comunque.
+async function leggiSePuoi(tabella, query, seManca = []) {
+  try {
+    return await leggi(tabella, query);
+  } catch (e) {
+    console.warn(`! ${tabella} non leggibile (${String(e.message).slice(0, 120)}). Proseguo senza.`);
+    return seManca;
+  }
+}
+
 // Il periodo contabile dipende dal giorno d'inizio dell'utente e dalle sue
 // eccezioni: serve per sapere a quale periodo appartiene una spunta.
 function inizioPeriodo(startDay, overrides, y, m) {
@@ -96,9 +107,14 @@ async function main() {
   oggi.setHours(0, 0, 0, 0);
 
   const regole = await leggi("recurring", "deleted_at=is.null&select=*");
-  const spunte = await leggi("recurring_paid", "select=recurring_id,period_key");
-  const profili = await leggi("profiles", "select=id,start_day");
-  const eccezioni = await leggi("period_overrides", "select=user_id,period_key,start_day");
+  const manuali = regole.filter((r) => r.manuale).length;
+  console.log(`Regole attive: ${regole.length} (di cui ${manuali} da pagare a mano).`);
+  if (regole.length && !("manuale" in regole[0])) {
+    console.warn("! La colonna 'manuale' non esiste: rilancia schema.sql. Le ricorrenti manuali non verranno riconosciute.");
+  }
+  const spunte = await leggiSePuoi("recurring_paid", "select=recurring_id,period_key");
+  const profili = await leggiSePuoi("profiles", "select=id,start_day");
+  const eccezioni = await leggiSePuoi("period_overrides", "select=user_id,period_key,start_day");
   const conti = await leggi("wallets", "deleted_at=is.null&select=id,name");
   const membri = await leggi("wallet_members", "select=wallet_id,user_id");
   const iscrizioni = await leggi("push_subscriptions", "select=*");
@@ -155,7 +171,7 @@ async function main() {
   }
 
   if (daMandare.size === 0) {
-    console.log(`Nessuna scadenza entro ${ANTICIPO} giorni.`);
+    console.log(`Nessuna scadenza entro ${ANTICIPO} giorni e nessuna da pagare in sospeso.`);
     return;
   }
 
