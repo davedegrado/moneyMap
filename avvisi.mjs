@@ -21,8 +21,24 @@ const CHIAVE = process.env.SUPABASE_SERVICE_KEY;
 const ANTICIPO = Number(process.env.GIORNI_PRIMA || 2);
 const PROVA = process.env.DRY_RUN === "1";
 
+// per le vecchie chiavi JWT il ruolo sta nel corpo, in chiaro
+function chiaveDecodificata(k) {
+  try { return Buffer.from(String(k).split(".")[1] || "", "base64").toString("utf8"); }
+  catch (e) { return ""; }
+}
+
 if (!URL_BASE || !CHIAVE) {
   console.error("Mancano SUPABASE_URL o SUPABASE_SERVICE_KEY");
+  process.exit(1);
+}
+
+// La chiave publishable non da' errore: le regole di accesso restano attive,
+// nessun utente e' collegato, e ogni tabella risponde con una lista vuota.
+// Sembra un database vuoto, e si cerca il problema dalla parte sbagliata.
+if (/^sb_publishable_/.test(CHIAVE) || /"role"\s*:\s*"anon"/.test(chiaveDecodificata(CHIAVE))) {
+  console.error("SUPABASE_SERVICE_KEY contiene la chiave pubblica, non quella secret.");
+  console.error("Con quella lo script non vede nulla e non manda niente.");
+  console.error("Prendila da Supabase → Project Settings → API Keys → secret.");
   process.exit(1);
 }
 
@@ -93,10 +109,26 @@ const euro = (n) =>
 
 const quando = (g) => (g === 0 ? "oggi" : g === 1 ? "domani" : `fra ${g} giorni`);
 
-// per le manuali con una scadenza: quanto manca, o da quanto e' passata
-function scadenzaTesto(day, oggi) {
-  const questo = new Date(oggi.getFullYear(), oggi.getMonth(), day);
-  const giorni = Math.round((questo - oggi) / 86400000);
+// La scadenza va cercata DENTRO il periodo in corso, non nel mese solare:
+// con periodo dal 9 e scadenza il 7, il 7 di questo mese appartiene al periodo
+// precedente, e diremmo "scaduta" una cosa che scade fra tre settimane.
+function scadenzaNelPeriodo(day, startDay, overrides, oggi) {
+  const inizio = inizioPeriodo(startDay, overrides, oggi.getFullYear(), oggi.getMonth());
+  const vero = oggi >= inizio ? inizio
+    : inizioPeriodo(startDay, overrides, oggi.getFullYear(), oggi.getMonth() - 1);
+  const fine = new Date(vero.getFullYear(), vero.getMonth() + 1, vero.getDate());
+  fine.setDate(fine.getDate() - 1);
+  for (const salto of [0, 1]) {
+    const d = new Date(vero.getFullYear(), vero.getMonth() + salto, day);
+    if (d >= vero && d <= fine) return d;
+  }
+  return null;
+}
+
+function scadenzaTesto(day, startDay, overrides, oggi) {
+  const d = scadenzaNelPeriodo(day, startDay, overrides, oggi);
+  if (!d) return "";
+  const giorni = Math.round((d - oggi) / 86400000);
   if (giorni === 0) return " · scade oggi";
   if (giorni > 0) return ` · entro ${quando(giorni)}`;
   return ` · scaduta da ${-giorni} ${-giorni === 1 ? "giorno" : "giorni"}`;
@@ -158,7 +190,7 @@ async function main() {
         if (periodo < (r.start_key || "")) continue;
         if (r.end_key && periodo > r.end_key) continue;
         if (pagata.has(`${r.id}|${periodo}`)) continue;
-        const scadenza = r.day ? scadenzaTesto(r.day, oggi) : "";
+        const scadenza = r.day ? scadenzaTesto(r.day, giornoInizio.get(u) || 1, eccezioniDi(u), oggi) : "";
         aggiungi(u, `${r.name} ${euro(r.amount)} da pagare${scadenza} · ${conto}${verso}`);
       }
       continue;
@@ -168,6 +200,12 @@ async function main() {
     if (!ev) continue;
     const riga = `${r.name} ${euro(r.amount)} ${quando(ev.giorni)} · ${conto}${verso}`;
     for (const u of utenti) aggiungi(u, riga);
+  }
+
+  if (regole.length === 0 && conti.length === 0 && iscrizioni.length === 0) {
+    console.warn("! Tutte le tabelle risultano vuote. Se nell'app i dati ci sono,");
+    console.warn("  la chiave non sta leggendo davvero: controlla SUPABASE_SERVICE_KEY,");
+    console.warn("  e che SUPABASE_URL sia il progetto giusto.");
   }
 
   if (daMandare.size === 0) {
